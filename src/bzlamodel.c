@@ -1078,6 +1078,24 @@ reduce_lambda_at_args(Bzla *bzla, BzlaNode *lambda, BzlaNode *args)
   return result;
 }
 
+static bool
+apply_reads_update_index(Bzla *bzla,
+                         BzlaNode *apply,
+                         BzlaNode *update,
+                         BzlaIntHashTable *bv_model,
+                         BzlaIntHashTable *fun_model)
+{
+  BzlaBitVectorTuple *read, *written;
+  bool result;
+
+  read = mk_bv_tuple_from_args(bzla, apply->e[1], bv_model, fun_model);
+  written = mk_bv_tuple_from_args(bzla, update->e[1], bv_model, fun_model);
+  result  = bzla_bv_compare_tuple(read, written) == 0;
+  bzla_bv_free_tuple(bzla->mm, read);
+  bzla_bv_free_tuple(bzla->mm, written);
+  return result;
+}
+
 /* Note: don't forget to free resulting bit vector! */
 BzlaBitVector *
 bzla_model_recursively_compute_assignment(Bzla *bzla,
@@ -1440,11 +1458,25 @@ bzla_model_recursively_compute_assignment(Bzla *bzla,
           result =
               get_apply_value(bzla, cur_parent, real_cur, bv_model, fun_model);
           if (!result)
-            result = e[2];
+          {
+            if (apply_reads_update_index(
+                    bzla, cur_parent, real_cur, bv_model, fun_model))
+            {
+              result = e[0];
+              bzla_bv_free(mm, e[2]);
+            }
+            else
+            {
+              result = e[2];
+              bzla_bv_free(mm, e[0]);
+            }
+          }
           else
+          {
             bzla_bv_free(mm, e[2]);
+            bzla_bv_free(mm, e[0]);
+          }
           bzla_bv_free(mm, e[1]);
-          bzla_bv_free(mm, e[0]);
           break;
 
         default:
