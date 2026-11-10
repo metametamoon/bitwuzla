@@ -1067,6 +1067,17 @@ get_apply_value(Bzla *bzla,
   return result;
 }
 
+static BzlaNode *
+reduce_lambda_at_args(Bzla *bzla, BzlaNode *lambda, BzlaNode *args)
+{
+  BzlaNode *result;
+
+  bzla_beta_assign_args(bzla, lambda, args);
+  result = bzla_beta_reduce_full(bzla, lambda, 0);
+  bzla_beta_unassign_params(bzla, lambda);
+  return result;
+}
+
 /* Note: don't forget to free resulting bit vector! */
 BzlaBitVector *
 bzla_model_recursively_compute_assignment(Bzla *bzla,
@@ -1126,6 +1137,18 @@ bzla_model_recursively_compute_assignment(Bzla *bzla,
     assert(!real_cur->parameterized);
 
     if (bzla_hashint_map_contains(bv_model, real_cur->id)) goto PUSH_CACHED;
+
+    if (bzla_node_is_lambda(real_cur) && cur_parent
+        && bzla_node_is_apply(cur_parent)
+        && bzla_node_real_addr(cur_parent->e[0]) != real_cur)
+    {
+      next = reduce_lambda_at_args(bzla, real_cur, cur_parent->e[1]);
+      assert(!bzla_node_real_addr(next)->parameterized);
+      BZLA_PUSH_STACK(work_stack, next);
+      BZLA_PUSH_STACK(work_stack, cur_parent);
+      BZLA_PUSH_STACK(cleanup_expanded, next);
+      continue;
+    }
 
     /* check if we already have an assignment for this function application */
     if (bzla_node_is_lambda(real_cur) && cur_parent
