@@ -16,6 +16,7 @@ set(test_names
   aig
   aigvec
   arithmetic
+  arraylambda
   bv
   bvdomain
   bvdomaingen
