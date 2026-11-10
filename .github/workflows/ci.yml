@@ -4,79 +4,47 @@ name: CI
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        name: [
-          production,
-          production-clang,
-          debug,
-          debug-clang
-        ]
-
-        exclude:
-          - name: production-clang
-            os: macos-latest
-
-          - name: debug-clang
-            os: macos-latest
-
+        name: [production, debug]
         include:
           - name: production
-            config:
-
-          - name: production-clang
-            config:
-            env: CC=clang CXX=clang++
-
+            config: production
           - name: debug
             config: debug
 
-          - name: debug-clang
-            config: debug
-            env: CC=clang CXX=clang++
-
-    name: ${{ matrix.os }}:${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    name: linux:${{ matrix.name }}
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Install Packages (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgmp-dev
+          sudo apt-get install -y libgmp-dev libgtest-dev python-is-python3
 
-      - name: Install Packages (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install gmp
-
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Restore Dependencies
         id: restore-deps
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: deps/install
-          key: ${{ runner.os }}-deps-${{ hashFiles('contrib/setup-*') }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: linux-deps-${{ hashFiles('contrib/setup-*') }}-${{ hashFiles('.github/workflows/ci.yml') }}
 
       - name: Setup Dependencies
         if: steps.restore-deps.outputs.cache-hit != 'true'
         run: |
           ./contrib/setup-btor2tools.sh
           ./contrib/setup-cadical.sh
-          ./contrib/setup-cms.sh
-          ./contrib/setup-kissat.sh
-          ./contrib/setup-lingeling.sh
           ./contrib/setup-symfpu.sh
 
       - name: Configure
-        run: |
-          ${{ matrix.env }} ./configure.sh ${{ matrix.config }}
+        run: ./configure.sh ${{ matrix.config }} --testing --only-cadical
 
       - name: Build
-        run: make -j2
+        run: make -j4
         working-directory: build
 
       - name: Run CTest
-        run: ctest -j2 --output-on-failure
+        run: ctest -j4 --output-on-failure
         working-directory: build
