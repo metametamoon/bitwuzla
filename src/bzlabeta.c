@@ -220,6 +220,44 @@ rebuild_node(Bzla *bzla, BzlaNode *n, BzlaNode **exps)
   return result;
 }
 
+static void
+assign_fresh_params(Bzla *bzla, BzlaNode *lambda)
+{
+  BzlaNode *cur;
+  BzlaNodeIterator it;
+
+  bzla_iter_lambda_init(&it, lambda);
+  while (bzla_iter_lambda_has_next(&it))
+  {
+    cur = bzla_iter_lambda_next(&it);
+    bzla_beta_assign_param(
+        bzla, cur, bzla_exp_param(bzla, bzla_node_get_sort_id(cur->e[0]), 0));
+  }
+}
+
+static BzlaNode *
+rebuild_lambda_over_fresh_params(Bzla *bzla, BzlaNode *lambda, BzlaNode *body)
+{
+  BzlaNode *result, *cur;
+  BzlaNodeIterator it;
+  BzlaNodePtrStack params;
+  uint32_t i;
+
+  BZLA_INIT_STACK(bzla->mm, params);
+  bzla_iter_lambda_init(&it, lambda);
+  while (bzla_iter_lambda_has_next(&it))
+  {
+    cur = bzla_iter_lambda_next(&it);
+    BZLA_PUSH_STACK(params, bzla_node_param_get_assigned_exp(cur->e[0]));
+  }
+  result = bzla_exp_fun(bzla, params.start, BZLA_COUNT_STACK(params), body);
+  if (lambda->is_array) result->is_array = 1;
+  for (i = 0; i < BZLA_COUNT_STACK(params); i++)
+    bzla_node_release(bzla, BZLA_PEEK_STACK(params, i));
+  BZLA_RELEASE_STACK(params);
+  return result;
+}
+
 /* We distinguish the following options for (un)bounded reduction:
  *
  *   BETA_RED_LAMBDA_MERGE: merge lambda chains
@@ -253,8 +291,9 @@ beta_reduce(Bzla *bzla,
   BzlaNode *cur, *real_cur, *cur_parent, *next, *result, **e, *args, *q;
   BzlaNode *cached;
   BzlaNodePtrStack stack, arg_stack, cleanup_stack, reset;
-  BzlaIntHashTable *mark;
+  BzlaIntHashTable *mark, *fresh;
   BzlaHashTableData *d, md;
+  bool rebuilt;
 #ifndef NDEBUG
   BzlaNodePtrStack unassign_stack;
   BZLA_INIT_STACK(bzla->mm, unassign_stack);
@@ -268,7 +307,8 @@ beta_reduce(Bzla *bzla,
   BZLA_INIT_STACK(mm, arg_stack);
   BZLA_INIT_STACK(mm, cleanup_stack);
   BZLA_INIT_STACK(mm, reset);
-  mark = bzla_hashint_map_new(mm);
+  mark  = bzla_hashint_map_new(mm);
+  fresh = bzla_hashint_table_new(mm);
 
   BZLA_PUSH_STACK(stack, exp);
   BZLA_PUSH_STACK(stack, 0);
@@ -394,6 +434,26 @@ beta_reduce(Bzla *bzla,
         BZLA_PUSH_STACK(arg_stack, bzla_node_copy(bzla, cur));
         continue;
       }
+      else if (bzla_node_is_lambda(real_cur) && cur_parent
+               && !bzla_node_is_lambda(cur_parent)
+               && !bzla_node_param_get_assigned_exp(real_cur->e[0])
+               && !real_cur->parameterized)
+      {
+        cur_lambda_depth--;
+        BZLA_PUSH_STACK(arg_stack, bzla_node_copy(bzla, cur));
+        continue;
+      }
+      else if (bzla_node_is_lambda(real_cur) && cur_parent
+               && !bzla_node_is_lambda(cur_parent)
+               && !bzla_node_param_get_assigned_exp(real_cur->e[0]))
+      {
+#ifndef NDEBUG
+        BZLA_PUSH_STACK(unassign_stack, real_cur);
+#endif
+        assign_fresh_params(bzla, real_cur);
+        bzla_hashint_table_add(fresh, real_cur->id);
+        BZLA_PUSH_STACK(reset, real_cur);
+      }
 
       bzla_hashint_map_add(mark, real_cur->id);
       BZLA_PUSH_STACK(stack, cur);
@@ -460,12 +520,17 @@ beta_reduce(Bzla *bzla,
               cache_beta_result(bzla, cache, real_cur->e[0], e[0], result);
             break;
           case BZLA_LAMBDA_NODE:
+            if (bzla_hashint_table_contains(fresh, real_cur->id))
+            {
+              result = rebuild_lambda_over_fresh_params(bzla, real_cur, e[0]);
+            }
             /* function equalities and conditionals always expect a lambda
              * as argument */
-            if (cur_parent
-                && (bzla_node_is_fun_eq(cur_parent)
-                    || (bzla_node_is_fun_cond(cur_parent)
-                        && !bzla_node_param_get_assigned_exp(real_cur->e[0]))))
+            else if (cur_parent
+                     && (bzla_node_is_fun_eq(cur_parent)
+                         || (bzla_node_is_fun_cond(cur_parent)
+                             && !bzla_node_param_get_assigned_exp(
+                                 real_cur->e[0]))))
             {
               assert(bzla_node_is_param(e[1]));
               result = bzla_exp_lambda(bzla, e[1], e[0]);
@@ -502,10 +567,13 @@ beta_reduce(Bzla *bzla,
         if (real_cur->parameterized || bzla_node_is_lambda(real_cur))
           BZLA_PUSH_STACK(reset, real_cur);
 
-        if (bzla_node_is_lambda(real_cur) && cur_parent
-            && bzla_node_is_apply(cur_parent)
-            && bzla_node_param_get_assigned_exp(real_cur->e[0]))
+        rebuilt = bzla_hashint_table_contains(fresh, real_cur->id);
+        if (rebuilt
+            || (bzla_node_is_lambda(real_cur) && cur_parent
+                && bzla_node_is_apply(cur_parent)
+                && bzla_node_param_get_assigned_exp(real_cur->e[0])))
         {
+          if (rebuilt) bzla_hashint_table_remove(fresh, real_cur->id);
           bzla_beta_unassign_params(bzla, real_cur);
 #ifndef NDEBUG
           (void) BZLA_POP_STACK(unassign_stack);
@@ -566,6 +634,8 @@ beta_reduce(Bzla *bzla,
   BZLA_RELEASE_STACK(unassign_stack);
 #endif
   bzla_hashint_map_delete(mark);
+  assert(fresh->count == 0);
+  bzla_hashint_table_delete(fresh);
 
   BZLALOG(2,
           "%s: result %s (%d)",
@@ -597,7 +667,7 @@ beta_reduce_partial_aux(Bzla *bzla,
   BzlaNode *cur, *real_cur, *cur_parent, *next, *result, **e, *args, *tmp;
   BzlaNodePtrStack stack, arg_stack, reset;
   BzlaPtrHashTable *t;
-  BzlaIntHashTable *mark;
+  BzlaIntHashTable *mark, *fresh;
   BzlaHashTableData *d, md;
 
   if (!bzla_node_real_addr(exp)->parameterized && !bzla_node_is_lambda(exp))
@@ -610,7 +680,8 @@ beta_reduce_partial_aux(Bzla *bzla,
   BZLA_INIT_STACK(mm, stack);
   BZLA_INIT_STACK(mm, arg_stack);
   BZLA_INIT_STACK(mm, reset);
-  mark = bzla_hashint_map_new(mm);
+  mark  = bzla_hashint_map_new(mm);
+  fresh = bzla_hashint_table_new(mm);
 
   real_cur = bzla_node_real_addr(exp);
 
@@ -657,6 +728,14 @@ beta_reduce_partial_aux(Bzla *bzla,
         args = BZLA_TOP_STACK(arg_stack);
         assert(bzla_node_is_args(args));
         bzla_beta_assign_args(bzla, real_cur, args);
+        BZLA_PUSH_STACK(reset, real_cur);
+      }
+      else if (bzla_node_is_lambda(real_cur) && cur_parent
+               && !bzla_node_is_lambda(cur_parent)
+               && !bzla_node_param_get_assigned_exp(real_cur->e[0]))
+      {
+        assign_fresh_params(bzla, real_cur);
+        bzla_hashint_table_add(fresh, real_cur->id);
         BZLA_PUSH_STACK(reset, real_cur);
       }
 
@@ -710,6 +789,11 @@ beta_reduce_partial_aux(Bzla *bzla,
           }
           break;
         case BZLA_LAMBDA_NODE:
+          if (bzla_hashint_table_contains(fresh, real_cur->id))
+          {
+            result = rebuild_lambda_over_fresh_params(bzla, real_cur, e[0]);
+            break;
+          }
           /* lambdas are always reduced to some term without e[1] */
           assert(!bzla_node_real_addr(e[0])->parameterized);
           result = bzla_node_copy(bzla, e[0]);
@@ -781,6 +865,7 @@ beta_reduce_partial_aux(Bzla *bzla,
 
       if (bzla_node_is_lambda(real_cur))
       {
+        bzla_hashint_table_remove(fresh, real_cur->id);
         bzla_beta_unassign_params(bzla, real_cur);
         next = BZLA_POP_STACK(reset);
         do
@@ -820,6 +905,8 @@ beta_reduce_partial_aux(Bzla *bzla,
   BZLA_RELEASE_STACK(arg_stack);
   BZLA_RELEASE_STACK(reset);
   bzla_hashint_map_delete(mark);
+  assert(fresh->count == 0);
+  bzla_hashint_table_delete(fresh);
 
   BZLALOG(2,
           "%s: result %s (%d)",
