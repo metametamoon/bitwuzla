@@ -1,0 +1,26 @@
+on:
+  push:
+    tags: ['*-ksmt.*']
+name: Release
+
+permissions:
+  contents: write
+
+jobs:
+  linux64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: ./contrib/ksmt/build-linux64.sh "$RUNNER_TEMP/out"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/out/libbitwuzla.so" \
+            "$RUNNER_TEMP/out/libbitwuzla.so.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "libbitwuzla.so for ksmt, Linux x64, built from $GITHUB_SHA by contrib/ksmt/build-linux64.sh."

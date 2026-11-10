@@ -1,0 +1,46 @@
+ARG BASE_REGISTRY=docker.io
+
+FROM ${BASE_REGISTRY}/library/ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde AS build
+
+ARG GMP_VERSION=6.3.0
+ARG GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      binutils build-essential ca-certificates cmake curl git m4 python3 xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN curl -fsSL -o gmp.tar.xz "https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz" \
+ && echo "${GMP_SHA256}  gmp.tar.xz" | sha256sum -c - \
+ && tar xf gmp.tar.xz \
+ && cd "gmp-${GMP_VERSION}" \
+ && ./configure --prefix=/build/deps --disable-shared --enable-static --with-pic --enable-fat --enable-cxx \
+ && make -j"$(nproc)" \
+ && make install
+
+COPY . /build/bitwuzla
+
+RUN cd bitwuzla \
+ && ./contrib/setup-cadical.sh \
+ && ./contrib/setup-btor2tools.sh \
+ && ./contrib/setup-symfpu.sh
+
+RUN cd bitwuzla \
+ && LDFLAGS="-static-libstdc++ -static-libgcc" ./configure.sh production --shared --only-cadical --path /build/deps \
+ && cd build \
+ && make -j"$(nproc)" bitwuzla
+
+RUN mkdir out \
+ && lib=/build/bitwuzla/build/lib/libbitwuzla.so \
+ && needed=$(objdump -p "$lib" | awk '/NEEDED/ { print $2 }' | grep -v '^ld-linux' | sort | tr '\n' ' ') \
+ && [ "$needed" = "libc.so.6 libm.so.6 " ] \
+ && ! nm -D --undefined-only "$lib" | grep -q -i gmp \
+ && strings "$lib" | grep -q -E -- '-[0-9a-f]{40}$' \
+ && ! strings "$lib" | grep -q -E -- '-[0-9a-f]{40}-dirty$' \
+ && cp "$lib" out/ \
+ && (cd out && sha256sum libbitwuzla.so > libbitwuzla.so.sha256)
+
+FROM scratch AS out
+COPY --from=build /build/out/ /
